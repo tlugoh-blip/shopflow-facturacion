@@ -1,10 +1,13 @@
 package co.shopflow.facturacion.service;
 
+import co.shopflow.facturacion.config.RabbitMQConfig;
 import co.shopflow.facturacion.model.Factura;
 import co.shopflow.facturacion.repository.FacturaRepository;
 import lombok.RequiredArgsConstructor;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.stereotype.Service;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -13,12 +16,12 @@ import java.util.Map;
 public class FacturaService {
 
     private final FacturaRepository facturaRepository;
+    private final RabbitTemplate rabbitTemplate;
 
     // COMMAND: Generar factura desde evento de pedido
     public Factura generarFactura(Map<String, Object> pedido) {
         Long pedidoId = Long.valueOf(pedido.get("id").toString());
 
-        // Verificar si ya existe factura para este pedido
         if (facturaRepository.findByPedidoId(pedidoId).isPresent()) {
             return facturaRepository.findByPedidoId(pedidoId).get();
         }
@@ -50,11 +53,24 @@ public class FacturaService {
         return facturaRepository.findAll();
     }
 
-    // COMMAND: Marcar factura como pagada
+    // COMMAND: Marcar factura como pagada y notificar a Logística
     public Factura marcarComoPagada(Long pedidoId) {
         Factura factura = facturaRepository.findByPedidoId(pedidoId)
                 .orElseThrow(() -> new RuntimeException("Factura no encontrada para pedido: " + pedidoId));
+
         factura.setEstado("PAGADA");
-        return facturaRepository.save(factura);
+        Factura guardada = facturaRepository.save(factura);
+
+        // Publicar evento de pago confirmado → Logística lo escucha
+        Map<String, Object> evento = new HashMap<>();
+        evento.put("pedidoId", pedidoId);
+        evento.put("clienteNombre", factura.getClienteNombre());
+        evento.put("clienteEmail", factura.getClienteEmail());
+        evento.put("total", factura.getTotal());
+
+        rabbitTemplate.convertAndSend(RabbitMQConfig.QUEUE_PAGO_CONFIRMADO, evento);
+        System.out.println("💳 Pago confirmado publicado en RabbitMQ para pedido: " + pedidoId);
+
+        return guardada;
     }
 }
